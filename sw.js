@@ -1,4 +1,4 @@
-var CACHE = 'moneylog-v1';
+var CACHE = 'moneylog-v2';
 var FILES = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', function (e) {

@@ -1,52 +1,55 @@
 (function () {
 'use strict';
 
-var KEY = 'mny.v1';
+var KEY = 'mny.v2';
+var OLD_KEY = 'mny.v1';
 var DAY = 864e5;
 
 /* ---------- data ---------- */
+function defaultAccount(name) {
+  return {
+    name: name,
+    opening: 0,
+    entries: [],
+    cats: {
+      expense: ['Food', 'Groceries', 'Rent/Bills', 'Transport', 'Health', 'Entertainment', 'Shopping', 'Other'],
+      income: ['Salary', 'Freelance', 'Other']
+    },
+    pays: ['Cash', 'Card', 'Bank transfer', 'Other'],
+    budgets: {}
+  };
+}
 function defaults() {
   return {
-    entries: [],
-    settings: {
-      opening: 0,
-      monthStart: 1,
-      theme: 'dark',
-      cats: {
-        expense: ['Food', 'Groceries', 'Rent/Bills', 'Transport', 'Health', 'Entertainment', 'Shopping', 'Other'],
-        income: ['Salary', 'Freelance', 'Other']
-      },
-      pays: ['Cash', 'Card', 'Bank transfer', 'Other'],
-      budgets: {}
-    }
+    v: 2,
+    accounts: [defaultAccount('Account 1'), defaultAccount('Account 2')],
+    settings: { monthStart: 1, theme: 'dark' }
   };
 }
 function isInt(n) { return typeof n === 'number' && isFinite(n) && Math.floor(n) === n; }
 function isStr(s) { return typeof s === 'string'; }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
-function sanitize(raw) {
-  var d = defaults();
-  if (!raw || typeof raw !== 'object') return d;
-  var s = raw.settings || {};
-  if (isInt(s.opening)) d.settings.opening = s.opening;
-  if (isInt(s.monthStart) && s.monthStart >= 1 && s.monthStart <= 28) d.settings.monthStart = s.monthStart;
-  if (s.theme === 'light' || s.theme === 'dark') d.settings.theme = s.theme;
-  if (s.cats && typeof s.cats === 'object') {
+function sanitizeAccount(raw, defName) {
+  var a = defaultAccount(defName);
+  if (!raw || typeof raw !== 'object') return a;
+  if (isStr(raw.name) && raw.name.trim()) a.name = raw.name.trim().slice(0, 20);
+  if (isInt(raw.opening)) a.opening = raw.opening;
+  if (raw.cats && typeof raw.cats === 'object') {
     ['expense', 'income'].forEach(function (t) {
-      if (Array.isArray(s.cats[t])) {
-        var l = s.cats[t].filter(function (x) { return isStr(x) && x.trim(); }).slice(0, 50);
-        if (l.length) d.settings.cats[t] = l;
+      if (Array.isArray(raw.cats[t])) {
+        var l = raw.cats[t].filter(function (x) { return isStr(x) && x.trim(); }).slice(0, 50);
+        if (l.length) a.cats[t] = l;
       }
     });
   }
-  if (Array.isArray(s.pays)) {
-    var p = s.pays.filter(function (x) { return isStr(x) && x.trim(); }).slice(0, 20);
-    if (p.length) d.settings.pays = p;
+  if (Array.isArray(raw.pays)) {
+    var p = raw.pays.filter(function (x) { return isStr(x) && x.trim(); }).slice(0, 20);
+    if (p.length) a.pays = p;
   }
-  if (s.budgets && typeof s.budgets === 'object') {
-    Object.keys(s.budgets).forEach(function (k) {
-      if (isInt(s.budgets[k]) && s.budgets[k] > 0) d.settings.budgets[k] = s.budgets[k];
+  if (raw.budgets && typeof raw.budgets === 'object') {
+    Object.keys(raw.budgets).forEach(function (k) {
+      if (isInt(raw.budgets[k]) && raw.budgets[k] > 0) a.budgets[k] = raw.budgets[k];
     });
   }
   if (Array.isArray(raw.entries)) {
@@ -55,7 +58,7 @@ function sanitize(raw) {
       if (!isInt(e.amount) || e.amount <= 0) return;
       var ts = +e.ts;
       if (!isFinite(ts)) return;
-      d.entries.push({
+      a.entries.push({
         id: isStr(e.id) && e.id ? e.id : uid(),
         type: e.type, amount: e.amount,
         cat: isStr(e.cat) && e.cat ? e.cat : 'Other',
@@ -65,19 +68,54 @@ function sanitize(raw) {
       });
     });
   }
+  return a;
+}
+
+function sanitizeSettings(s, d) {
+  s = s && typeof s === 'object' ? s : {};
+  if (isInt(s.monthStart) && s.monthStart >= 1 && s.monthStart <= 28) d.monthStart = s.monthStart;
+  if (s.theme === 'light' || s.theme === 'dark') d.theme = s.theme;
+}
+
+/* accepts the new two-account format and the old single-account format */
+function sanitize(raw) {
+  var d = defaults();
+  if (!raw || typeof raw !== 'object') return d;
+  if (Array.isArray(raw.accounts)) {
+    d.accounts = [sanitizeAccount(raw.accounts[0], 'Account 1'), sanitizeAccount(raw.accounts[1], 'Account 2')];
+    sanitizeSettings(raw.settings, d.settings);
+    return d;
+  }
+  if (Array.isArray(raw.entries)) {
+    var s = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
+    d.accounts[0] = sanitizeAccount({
+      entries: raw.entries, opening: s.opening, cats: s.cats, pays: s.pays, budgets: s.budgets
+    }, 'Account 1');
+    sanitizeSettings(s, d.settings);
+  }
   return d;
 }
 
 var db;
 function load() {
-  try { db = sanitize(JSON.parse(localStorage.getItem(KEY))); }
-  catch (e) { db = defaults(); }
+  var raw = null, migrated = false;
+  try { raw = localStorage.getItem(KEY); } catch (e) {}
+  if (raw === null) {
+    try { raw = localStorage.getItem(OLD_KEY); migrated = raw !== null; } catch (e) {}
+  }
+  try { db = sanitize(JSON.parse(raw)); } catch (e) { db = defaults(); }
+  if (migrated) save(); // old key is left untouched as a safety copy
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); return true; }
   catch (e) { toast('Could not save: storage full or blocked'); return false; }
 }
 function S() { return db.settings; }
+
+/* ---------- ui state ---------- */
+var ui = { tab: 'add', offset: 0, filter: 'all', acct: 0 };
+var drafts = { add: [null, null], edit: null };
+function A() { return db.accounts[ui.acct]; }
 
 /* ---------- money & dates ---------- */
 var nf = null;
@@ -103,7 +141,7 @@ function esc(s) {
 }
 function fmtDay(d) { return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); }
 
-/* period = month starting on settings.monthStart */
+/* period = month starting on settings.monthStart (shared by both accounts) */
 function range(offset) {
   var st = S().monthStart, now = new Date();
   var y = now.getFullYear(), m = now.getMonth();
@@ -116,31 +154,32 @@ function range(offset) {
   return { start: start.getTime(), end: end.getTime(), label: label, startDate: start };
 }
 function inRange(r) {
-  return db.entries.filter(function (e) { return e.ts >= r.start && e.ts < r.end; });
+  return A().entries.filter(function (e) { return e.ts >= r.start && e.ts < r.end; });
 }
 function totals(list) {
   var i = 0, x = 0;
   list.forEach(function (e) { if (e.type === 'income') i += e.amount; else x += e.amount; });
   return { inc: i, exp: x, net: i - x };
 }
-function balance() { return S().opening + totals(db.entries).net; }
+function balanceOf(acct) { return acct.opening + totals(acct.entries).net; }
 function sortedDesc(list) { return list.slice().sort(function (a, b) { return b.ts - a.ts; }); }
-
-/* ---------- ui state ---------- */
-var ui = { tab: 'add', offset: 0, filter: 'all' };
-var drafts = { add: null, edit: null };
 
 function newDraft(prev) {
   var t = prev ? prev.type : 'expense';
-  var pays = S().pays;
+  var pays = A().pays;
   return {
     type: t,
     amount: '',
-    cat: S().cats[t][0],
+    cat: A().cats[t][0],
     pay: prev && pays.indexOf(prev.pay) >= 0 ? prev.pay : pays[0],
     note: '',
     when: toLocalInput(Date.now())
   };
+}
+function D(scope) {
+  if (scope === 'edit') return drafts.edit;
+  if (!drafts.add[ui.acct]) drafts.add[ui.acct] = newDraft();
+  return drafts.add[ui.acct];
 }
 
 var $ = function (s) { return document.querySelector(s); };
@@ -160,10 +199,17 @@ function toast(msg) {
 }
 
 /* ---------- views ---------- */
+function acctBar() {
+  return '<div class="acct">' + db.accounts.map(function (a, i) {
+    return '<button class="' + (i === ui.acct ? 'on' : '') + '" data-act="acct" data-v="' + i + '">' + esc(a.name) + '</button>';
+  }).join('') + '</div>';
+}
+
 function formHTML(d, scope) {
-  var cats = S().cats[d.type].slice();
+  var a = A();
+  var cats = a.cats[d.type].slice();
   if (d.cat && cats.indexOf(d.cat) < 0) cats.push(d.cat);
-  var pays = S().pays.slice();
+  var pays = a.pays.slice();
   if (d.pay && pays.indexOf(d.pay) < 0) pays.push(d.pay);
   var h = '<div class="seg">' + ['expense', 'income'].map(function (t) {
     return '<button class="' + (d.type === t ? 'on ' + t : '') + '" data-act="type" data-scope="' + scope + '" data-v="' + t + '">' +
@@ -192,13 +238,15 @@ function rowHTML(e, showDate) {
 }
 
 function addView() {
-  if (!drafts.add) drafts.add = newDraft();
-  var r = range(0), t = totals(inRange(r)), bal = balance();
-  var h = '<h1>Add</h1>';
-  h += '<div class="card"><div class="lbl">Total balance</div><div class="big ' + (bal < 0 ? 'exp' : '') + '">' + fmt(bal) + '</div>' +
-    '<div class="sub">' + esc(r.label) + ': <span class="inc">+' + fmt(t.inc) + '</span> · <span class="exp">−' + fmt(t.exp) + '</span></div></div>';
-  h += '<div class="card">' + formHTML(drafts.add, 'add') + '<button class="btn" data-act="save" data-scope="add">Save entry</button></div>';
-  var recent = sortedDesc(db.entries).slice(0, 5);
+  var d = D('add'), a = A();
+  var r = range(0), t = totals(inRange(r)), bal = balanceOf(a);
+  var all = balanceOf(db.accounts[0]) + balanceOf(db.accounts[1]);
+  var h = '<h1>Add</h1>' + acctBar();
+  h += '<div class="card"><div class="lbl">' + esc(a.name) + ' balance</div><div class="big ' + (bal < 0 ? 'exp' : '') + '">' + fmt(bal) + '</div>' +
+    '<div class="sub">' + esc(r.label) + ': <span class="inc">+' + fmt(t.inc) + '</span> · <span class="exp">−' + fmt(t.exp) + '</span></div>' +
+    '<div class="sub" data-total="1">Both accounts: ' + fmt(all) + '</div></div>';
+  h += '<div class="card">' + formHTML(d, 'add') + '<button class="btn" data-act="save" data-scope="add">Save entry</button></div>';
+  var recent = sortedDesc(a.entries).slice(0, 5);
   if (recent.length) {
     h += '<h2>Recent</h2>' + recent.map(function (e) { return rowHTML(e, true); }).join('');
   }
@@ -212,7 +260,7 @@ function navHTML(r) {
 
 function historyView() {
   var r = range(ui.offset), list = inRange(r), t = totals(list);
-  var h = '<h1>History</h1>' + navHTML(r);
+  var h = '<h1>History</h1>' + acctBar() + navHTML(r);
   h += '<div class="sum"><div><div class="lbl">Income</div><div class="v inc">' + fmt(t.inc) + '</div></div>' +
     '<div><div class="lbl">Expenses</div><div class="v exp">' + fmt(t.exp) + '</div></div>' +
     '<div><div class="lbl">Net</div><div class="v ' + (t.net < 0 ? 'exp' : 'inc') + '">' + fmt(t.net) + '</div></div></div>';
@@ -262,9 +310,9 @@ function dailyChart(list, r) {
 }
 
 function trendChart() {
-  var rows = [], k;
+  var rows = [], k, saved = ui.offset;
   for (k = -5; k <= 0; k++) {
-    var r = range(ui.offset + k), t = totals(inRange(r));
+    var r = range(saved + k), t = totals(inRange(r));
     rows.push({ label: r.startDate.toLocaleDateString('en-GB', { month: 'short' }), inc: t.inc, exp: t.exp });
   }
   var max = Math.max.apply(null, rows.map(function (x) { return Math.max(x.inc, x.exp); }));
@@ -283,8 +331,8 @@ function trendChart() {
 }
 
 function statsView() {
-  var r = range(ui.offset), list = inRange(r), t = totals(list);
-  var h = '<h1>Stats</h1>' + navHTML(r);
+  var r = range(ui.offset), list = inRange(r), t = totals(list), a = A();
+  var h = '<h1>Stats</h1>' + acctBar() + navHTML(r);
   h += '<div class="sum"><div><div class="lbl">Income</div><div class="v inc">' + fmt(t.inc) + '</div></div>' +
     '<div><div class="lbl">Expenses</div><div class="v exp">' + fmt(t.exp) + '</div></div>' +
     '<div><div class="lbl">Net</div><div class="v ' + (t.net < 0 ? 'exp' : 'inc') + '">' + fmt(t.net) + '</div></div></div>';
@@ -292,7 +340,7 @@ function statsView() {
   var spent = {};
   list.forEach(function (e) { if (e.type === 'expense') spent[e.cat] = (spent[e.cat] || 0) + e.amount; });
 
-  var budgets = S().budgets, bk = Object.keys(budgets);
+  var budgets = a.budgets, bk = Object.keys(budgets);
   h += '<h2>Budgets</h2><div class="card">';
   if (!bk.length) h += '<div class="sub">No budgets set. Add them in Settings.</div>';
   else bk.forEach(function (c) {
@@ -303,7 +351,7 @@ function statsView() {
   h += '</div>';
 
   h += '<h2>Expenses by category</h2><div class="card">';
-  var ek = Object.keys(spent).sort(function (a, b) { return spent[b] - spent[a]; });
+  var ek = Object.keys(spent).sort(function (x, y) { return spent[y] - spent[x]; });
   if (!ek.length) h += '<div class="sub">No expenses in this period.</div>';
   else ek.forEach(function (c) {
     var pct = t.exp ? spent[c] / t.exp * 100 : 0;
@@ -314,7 +362,7 @@ function statsView() {
 
   var earned = {};
   list.forEach(function (e) { if (e.type === 'income') earned[e.cat] = (earned[e.cat] || 0) + e.amount; });
-  var ik = Object.keys(earned).sort(function (a, b) { return earned[b] - earned[a]; });
+  var ik = Object.keys(earned).sort(function (x, y) { return earned[y] - earned[x]; });
   if (ik.length) {
     h += '<h2>Income by category</h2><div class="card">' + ik.map(function (c) {
       return '<div class="line"><span>' + esc(c) + '</span><span class="inc">' + fmt(earned[c]) + '</span></div>';
@@ -328,35 +376,43 @@ function statsView() {
 }
 
 function settingsView() {
-  var s = S(), h = '<h1>Settings</h1>';
+  var s = S(), a = A(), h = '<h1>Settings</h1>';
   h += '<h2>Appearance</h2><div class="seg">' + ['dark', 'light'].map(function (t) {
     return '<button class="' + (s.theme === t ? 'on' : '') + '" data-act="theme" data-v="' + t + '">' + (t === 'dark' ? 'Dark' : 'Light') + '</button>';
   }).join('') + '</div>';
 
-  h += '<h2>Money</h2><div class="card">' +
-    '<label class="fld"><span>Opening balance (€)</span><input type="text" inputmode="decimal" data-set="opening" value="' + (s.opening / 100).toFixed(2) + '"></label>' +
+  h += '<h2>General (both accounts)</h2><div class="card">' +
+    db.accounts.map(function (ac, i) {
+      return '<label class="fld"><span>Account ' + (i + 1) + ' name</span><input type="text" maxlength="20" data-acctname="' + i + '" value="' + esc(ac.name) + '"></label>';
+    }).join('') +
     '<label class="fld" style="margin-bottom:0"><span>Month starts on day (1–28)</span><input type="number" inputmode="numeric" min="1" max="28" data-set="monthStart" value="' + s.monthStart + '"></label>' +
     '<div class="hint">Set to your payday (e.g. 25) so periods run from payday to payday.</div></div>';
 
-  h += '<h2>Monthly budgets (expenses)</h2><div class="card">' + s.cats.expense.map(function (c) {
+  h += '<h2>Settings for</h2>' + acctBar() +
+    '<div class="hint" style="margin-top:-4px;margin-bottom:10px">Everything below applies only to <b>' + esc(a.name) + '</b>. Swipe or tap the names to switch account.</div>';
+
+  h += '<div class="card"><label class="fld" style="margin-bottom:0"><span>Opening balance (€)</span><input type="text" inputmode="decimal" data-set="opening" value="' + (a.opening / 100).toFixed(2) + '"></label></div>';
+
+  h += '<h2>Monthly budgets (expenses)</h2><div class="card">' + a.cats.expense.map(function (c) {
     return '<label class="fld"><span>' + esc(c) + '</span><input type="text" inputmode="decimal" placeholder="No budget" data-budget="' + esc(c) + '" value="' +
-      (s.budgets[c] ? (s.budgets[c] / 100).toFixed(2) : '') + '"></label>';
+      (a.budgets[c] ? (a.budgets[c] / 100).toFixed(2) : '') + '"></label>';
   }).join('') + '<div class="hint" style="margin-top:-4px">Leave empty for no budget.</div></div>';
 
   [['expense', 'Expense categories'], ['income', 'Income categories']].forEach(function (p) {
-    h += '<h2>' + p[1] + '</h2><div class="card"><div class="chips">' + s.cats[p[0]].map(function (c) {
+    h += '<h2>' + p[1] + '</h2><div class="card"><div class="chips">' + a.cats[p[0]].map(function (c) {
       return '<button class="chip rm" data-act="rmcat" data-t="' + p[0] + '" data-v="' + esc(c) + '">' + esc(c) + '</button>';
     }).join('') + '</div><div class="add-inline"><input type="text" maxlength="30" placeholder="New category" data-newcat="' + p[0] +
       '"><button data-act="addcat" data-t="' + p[0] + '">Add</button></div></div>';
   });
-  h += '<h2>Payment methods</h2><div class="card"><div class="chips">' + s.pays.map(function (c) {
+  h += '<h2>Payment methods</h2><div class="card"><div class="chips">' + a.pays.map(function (c) {
     return '<button class="chip rm" data-act="rmpay" data-v="' + esc(c) + '">' + esc(c) + '</button>';
   }).join('') + '</div><div class="add-inline"><input type="text" maxlength="30" placeholder="New method" data-newpay="1">' +
     '<button data-act="addpay">Add</button></div></div>';
   h += '<div class="hint">Removing a category or method does not change past entries.</div>';
 
-  h += '<h2>Data</h2><div class="card">' +
-    '<div class="sub" style="margin-bottom:10px">' + db.entries.length + ' entries stored on this device only.</div>' +
+  h += '<h2>Data (both accounts)</h2><div class="card">' +
+    '<div class="sub" style="margin-bottom:10px">' + esc(db.accounts[0].name) + ': ' + db.accounts[0].entries.length + ' entries · ' +
+    esc(db.accounts[1].name) + ': ' + db.accounts[1].entries.length + ' entries. Stored on this device only.</div>' +
     '<button class="btn sec" data-act="csv">Export CSV</button>' +
     '<button class="btn sec" data-act="backup">Export backup (JSON)</button>' +
     '<button class="btn sec" data-act="import">Import backup (JSON)</button>' +
@@ -368,24 +424,43 @@ function settingsView() {
 
 var views = { add: addView, history: historyView, stats: statsView, settings: settingsView };
 
-function render(keepScroll) {
+function tabKey() { return ui.tab === 'add' ? (ui.acct === 1 ? 'add2' : 'add') : ui.tab; }
+
+function render(keepScroll, dir) {
   var y = keepScroll ? window.scrollY : 0;
-  $('#view').innerHTML = views[ui.tab]();
+  var v = $('#view');
+  v.innerHTML = views[ui.tab]();
+  v.classList.remove('in-l', 'in-r');
+  if (dir) {
+    void v.offsetWidth;
+    v.classList.add(dir === 'l' ? 'in-l' : 'in-r');
+  }
+  var k = tabKey();
   Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function (b) {
-    b.classList.toggle('on', b.dataset.tab === ui.tab);
+    b.classList.toggle('on', b.dataset.tab === k);
   });
   window.scrollTo(0, y);
 }
 
+function switchAcct(i) {
+  if (i === ui.acct || !db.accounts[i]) return;
+  var dir = i > ui.acct ? 'l' : 'r';
+  ui.acct = i;
+  var dd = drafts.add[i];
+  if (ui.tab === 'add' && dd && !dd.amount) dd.when = toLocalInput(Date.now());
+  render(false, dir);
+}
+
 function openSheet(id) {
-  var e = db.entries.filter(function (x) { return x.id === id; })[0];
+  var e = A().entries.filter(function (x) { return x.id === id; })[0];
   if (!e) return;
   drafts.edit = { id: e.id, type: e.type, amount: (e.amount / 100).toFixed(2), cat: e.cat, pay: e.pay, note: e.note, when: toLocalInput(e.ts) };
   renderSheet();
   $('#sheet').hidden = false;
 }
 function renderSheet() {
-  $('#sheet').innerHTML = '<div class="backdrop" data-act="close"></div><div class="sheet"><h1>Edit entry</h1>' + formHTML(drafts.edit, 'edit') +
+  $('#sheet').innerHTML = '<div class="backdrop" data-act="close"></div><div class="sheet"><h1>Edit entry</h1>' +
+    '<div class="hint" style="margin-top:-8px;margin-bottom:10px">' + esc(A().name) + '</div>' + formHTML(drafts.edit, 'edit') +
     '<button class="btn" data-act="save" data-scope="edit">Save changes</button>' +
     '<button class="btn danger" data-act="del">Delete entry</button>' +
     '<button class="btn sec" data-act="close">Cancel</button></div>';
@@ -396,7 +471,7 @@ function closeSheet() { $('#sheet').hidden = true; $('#sheet').innerHTML = ''; d
 function redraw(scope) { if (scope === 'edit') renderSheet(); else render(true); }
 
 function saveDraft(scope) {
-  var d = drafts[scope];
+  var d = D(scope), a = A();
   var amt = parseMoney(d.amount, false);
   if (!(amt > 0)) { toast('Enter a valid amount, e.g. 12.50'); return; }
   var ts = new Date(d.when).getTime();
@@ -404,16 +479,16 @@ function saveDraft(scope) {
   var entry;
   if (scope === 'add') {
     entry = { id: uid(), type: d.type, amount: amt, cat: d.cat, pay: d.pay, note: d.note.trim(), ts: ts };
-    db.entries.push(entry);
+    a.entries.push(entry);
   } else {
-    entry = db.entries.filter(function (x) { return x.id === d.id; })[0];
+    entry = a.entries.filter(function (x) { return x.id === d.id; })[0];
     if (!entry) { closeSheet(); return; }
     entry.type = d.type; entry.amount = amt; entry.cat = d.cat; entry.pay = d.pay; entry.note = d.note.trim(); entry.ts = ts;
   }
   if (!save()) return;
-  var msg = scope === 'add' ? 'Saved' : 'Changes saved';
+  var msg = scope === 'add' ? 'Saved to ' + a.name : 'Changes saved';
   if (entry.type === 'expense') {
-    var lim = S().budgets[entry.cat];
+    var lim = a.budgets[entry.cat];
     if (lim) {
       var r = range(0);
       if (entry.ts >= r.start && entry.ts < r.end) {
@@ -424,7 +499,7 @@ function saveDraft(scope) {
       }
     }
   }
-  if (scope === 'add') drafts.add = newDraft(d);
+  if (scope === 'add') drafts.add[ui.acct] = newDraft(d);
   else closeSheet();
   toast(msg);
   render(true);
@@ -447,10 +522,12 @@ function saveFile(name, text, mime) {
 function stamp() { var d = new Date(); return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()); }
 function csvCell(v) { v = String(v); return /[",\n\r;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 function exportCSV() {
-  var rows = ['date,time,type,amount,category,payment,note'];
-  sortedDesc(db.entries).reverse().forEach(function (e) {
-    var l = toLocalInput(e.ts).split('T');
-    rows.push([l[0], l[1], e.type, (e.amount / 100).toFixed(2), e.cat, e.pay, e.note].map(csvCell).join(','));
+  var rows = ['account,date,time,type,amount,category,payment,note'];
+  db.accounts.forEach(function (acc) {
+    sortedDesc(acc.entries).reverse().forEach(function (e) {
+      var l = toLocalInput(e.ts).split('T');
+      rows.push([acc.name, l[0], l[1], e.type, (e.amount / 100).toFixed(2), e.cat, e.pay, e.note].map(csvCell).join(','));
+    });
   });
   saveFile('moneylog-' + stamp() + '.csv', '﻿' + rows.join('\r\n'), 'text/csv');
 }
@@ -461,24 +538,30 @@ function cleanName(s) { return String(s || '').trim().replace(/\s+/g, ' '); }
 document.addEventListener('click', function (ev) {
   var t = ev.target.closest ? ev.target.closest('[data-act]') : null;
   if (!t) return;
-  var a = t.dataset.act, v = t.dataset.v, scope = t.dataset.scope, d;
+  var a = t.dataset.act, v = t.dataset.v, scope = t.dataset.scope, d, ac = A();
   if (a === 'tab') {
-    ui.tab = t.dataset.tab; ui.offset = 0;
-    if (ui.tab === 'add' && drafts.add && !drafts.add.amount) drafts.add.when = toLocalInput(Date.now());
-    render(false);
-  } else if (a === 'type') {
-    d = drafts[scope];
-    if (d.type !== v) { d.type = v; d.cat = S().cats[v][0]; }
+    var tb = t.dataset.tab, prevAcct = ui.acct;
+    if (tb === 'add2') { ui.tab = 'add'; ui.acct = 1; }
+    else if (tb === 'add') { ui.tab = 'add'; ui.acct = 0; }
+    else ui.tab = tb;
+    ui.offset = 0;
+    var dd = drafts.add[ui.acct];
+    if (ui.tab === 'add' && dd && !dd.amount) dd.when = toLocalInput(Date.now());
+    render(false, ui.acct !== prevAcct ? (ui.acct > prevAcct ? 'l' : 'r') : null);
+  } else if (a === 'acct') { switchAcct(parseInt(v, 10)); }
+  else if (a === 'type') {
+    d = D(scope);
+    if (d.type !== v) { d.type = v; d.cat = ac.cats[v][0]; }
     redraw(scope);
-  } else if (a === 'cat') { drafts[scope].cat = v; redraw(scope); }
-  else if (a === 'pay') { drafts[scope].pay = v; redraw(scope); }
+  } else if (a === 'cat') { D(scope).cat = v; redraw(scope); }
+  else if (a === 'pay') { D(scope).pay = v; redraw(scope); }
   else if (a === 'save') saveDraft(scope);
   else if (a === 'open') openSheet(t.dataset.id);
   else if (a === 'close') closeSheet();
   else if (a === 'del') {
     if (drafts.edit && confirm('Delete this entry?')) {
       var id = drafts.edit.id;
-      db.entries = db.entries.filter(function (x) { return x.id !== id; });
+      ac.entries = ac.entries.filter(function (x) { return x.id !== id; });
       save(); closeSheet(); toast('Deleted'); render(true);
     }
   }
@@ -487,75 +570,102 @@ document.addEventListener('click', function (ev) {
   else if (a === 'filter') { ui.filter = v; render(true); }
   else if (a === 'theme') { S().theme = v; save(); applyTheme(); render(true); }
   else if (a === 'addcat') {
-    var inp = document.querySelector('[data-newcat="' + t.dataset.t + '"]'), n = cleanName(inp && inp.value), list = S().cats[t.dataset.t];
+    var inp = document.querySelector('[data-newcat="' + t.dataset.t + '"]'), n = cleanName(inp && inp.value), list = ac.cats[t.dataset.t];
     if (!n) return;
     if (list.some(function (c) { return c.toLowerCase() === n.toLowerCase(); })) { toast('Already exists'); return; }
     list.push(n); save(); render(true);
   }
   else if (a === 'rmcat') {
-    var l2 = S().cats[t.dataset.t];
+    var l2 = ac.cats[t.dataset.t];
     if (l2.length <= 1) { toast('Keep at least one category'); return; }
-    S().cats[t.dataset.t] = l2.filter(function (c) { return c !== v; });
-    if (t.dataset.t === 'expense') delete S().budgets[v];
-    drafts.add = null; save(); render(true);
+    ac.cats[t.dataset.t] = l2.filter(function (c) { return c !== v; });
+    if (t.dataset.t === 'expense') delete ac.budgets[v];
+    drafts.add[ui.acct] = null; save(); render(true);
   }
   else if (a === 'addpay') {
     var pi = document.querySelector('[data-newpay]'), pn = cleanName(pi && pi.value);
     if (!pn) return;
-    if (S().pays.some(function (c) { return c.toLowerCase() === pn.toLowerCase(); })) { toast('Already exists'); return; }
-    S().pays.push(pn); save(); render(true);
+    if (ac.pays.some(function (c) { return c.toLowerCase() === pn.toLowerCase(); })) { toast('Already exists'); return; }
+    ac.pays.push(pn); save(); render(true);
   }
   else if (a === 'rmpay') {
-    if (S().pays.length <= 1) { toast('Keep at least one method'); return; }
-    S().pays = S().pays.filter(function (c) { return c !== v; });
-    drafts.add = null; save(); render(true);
+    if (ac.pays.length <= 1) { toast('Keep at least one method'); return; }
+    ac.pays = ac.pays.filter(function (c) { return c !== v; });
+    drafts.add[ui.acct] = null; save(); render(true);
   }
   else if (a === 'csv') exportCSV();
   else if (a === 'backup') exportBackup();
   else if (a === 'import') { var f = $('#file'); if (f) f.click(); }
   else if (a === 'reset') {
-    if (confirm('Delete ALL entries and settings? This cannot be undone.') && confirm('Really delete everything?')) {
-      db = defaults(); drafts.add = null; save(); applyTheme(); toast('All data deleted'); render(false);
+    if (confirm('Delete ALL entries and settings of BOTH accounts? This cannot be undone.') && confirm('Really delete everything?')) {
+      db = defaults(); drafts.add = [null, null]; save(); applyTheme(); toast('All data deleted'); render(false);
     }
   }
 });
 
 document.addEventListener('input', function (ev) {
   var t = ev.target;
-  if (t.dataset && t.dataset.field && drafts[t.dataset.scope]) drafts[t.dataset.scope][t.dataset.field] = t.value;
+  if (t.dataset && t.dataset.field && (t.dataset.scope === 'edit' ? drafts.edit : true)) D(t.dataset.scope)[t.dataset.field] = t.value;
 });
 
 document.addEventListener('change', function (ev) {
-  var t = ev.target;
+  var t = ev.target, ac = A();
   if (!t.dataset) return;
   if (t.dataset.set === 'opening') {
     var n = parseMoney(t.value, true);
     if (isNaN(n)) { toast('Invalid amount'); render(true); return; }
-    S().opening = n; save(); toast('Saved');
+    ac.opening = n; save(); toast('Saved');
   } else if (t.dataset.set === 'monthStart') {
     var m = parseInt(t.value, 10);
     if (!(m >= 1 && m <= 28)) { toast('Use a day from 1 to 28'); render(true); return; }
     S().monthStart = m; save(); toast('Saved');
+  } else if (t.dataset.acctname !== undefined) {
+    var idx = parseInt(t.dataset.acctname, 10), nm = cleanName(t.value).slice(0, 20);
+    if (!nm) { toast('Name cannot be empty'); render(true); return; }
+    db.accounts[idx].name = nm; save(); toast('Saved'); render(true);
   } else if (t.dataset.budget) {
     var c = t.dataset.budget;
-    if (String(t.value).trim() === '') { delete S().budgets[c]; save(); toast('Budget removed'); return; }
+    if (String(t.value).trim() === '') { delete ac.budgets[c]; save(); toast('Budget removed'); return; }
     var b = parseMoney(t.value, false);
     if (!(b > 0)) { toast('Invalid budget'); render(true); return; }
-    S().budgets[c] = b; save(); toast('Saved');
+    ac.budgets[c] = b; save(); toast('Saved');
   } else if (t.id === 'file' && t.files && t.files[0]) {
     var rd = new FileReader();
     rd.onload = function () {
       var parsed;
       try { parsed = JSON.parse(rd.result); } catch (e) { toast('Not a valid backup file'); return; }
-      if (!parsed || !Array.isArray(parsed.entries)) { toast('Not a Money Log backup'); return; }
+      var isNew = parsed && Array.isArray(parsed.accounts), isOld = parsed && Array.isArray(parsed.entries);
+      if (!isNew && !isOld) { toast('Not a Money Log backup'); return; }
       var next = sanitize(parsed);
-      if (confirm('Replace current data with ' + next.entries.length + ' entries from this backup?')) {
-        db = next; drafts.add = null; save(); applyTheme(); toast('Backup imported'); render(false);
+      var msg = isNew
+        ? 'Replace ALL current data (both accounts) with this backup? (' + next.accounts[0].entries.length + ' + ' + next.accounts[1].entries.length + ' entries)'
+        : 'This is an old single-account backup (' + next.accounts[0].entries.length + ' entries). It will replace ALL current data and go into Account 1. Continue?';
+      if (confirm(msg)) {
+        db = next; drafts.add = [null, null]; save(); applyTheme(); toast('Backup imported'); render(false);
       }
     };
     rd.readAsText(t.files[0]);
   }
 });
+
+/* ---------- swipe between accounts ---------- */
+var sw = null;
+document.addEventListener('touchstart', function (ev) {
+  var sheet = $('#sheet');
+  if ((sheet && !sheet.hidden) || !ev.touches || ev.touches.length !== 1) { sw = null; return; }
+  var tg = ev.target;
+  if (tg && tg.closest && tg.closest('input,textarea,select,#tabs')) { sw = null; return; }
+  sw = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+}, { passive: true });
+document.addEventListener('touchend', function (ev) {
+  if (!sw) return;
+  var p = ev.changedTouches && ev.changedTouches[0], s0 = sw;
+  sw = null;
+  if (!p) return;
+  var dx = p.clientX - s0.x, dy = p.clientY - s0.y;
+  if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.5) switchAcct(dx < 0 ? 1 : 0);
+}, { passive: true });
+document.addEventListener('touchcancel', function () { sw = null; }, { passive: true });
 
 /* ---------- start ---------- */
 load();

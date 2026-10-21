@@ -71,3 +71,13 @@ nav#tabs svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2
 .add-inline{display:flex;gap:8px;margin-top:10px}
 .add-inline input{margin-top:0}
 .add-inline button{border:0;background:var(--btn);color:var(--btntx);font:inherit;font-weight:700;border-radius:12px;padding:0 16px}
+#view{min-height:60vh}
+.acct{display:flex;gap:8px;margin-bottom:12px}
+.acct button{flex:1;min-width:0;border:1px solid var(--line);background:var(--card);color:var(--mut);font:inherit;font-weight:600;padding:9px 10px;border-radius:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct button.on{background:var(--acc);border-color:var(--acc);color:var(--btntx)}
+@keyframes inL{from{transform:translateX(36px);opacity:0}to{transform:none;opacity:1}}
+@keyframes inR{from{transform:translateX(-36px);opacity:0}to{transform:none;opacity:1}}
+#view.in-l{animation:inL .22s ease-out}
+#view.in-r{animation:inR .22s ease-out}
+@media (prefers-reduced-motion:reduce){#view.in-l,#view.in-r{animation:none}}
+nav#tabs button{font-size:10.5px;min-width:0}
