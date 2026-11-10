@@ -1,9 +1,11 @@
 (function () {
 'use strict';
 
-var KEY = 'mny.v2';
-var OLD_KEY = 'mny.v1';
+var KEYS = ['mny.v3', 'mny.v2', 'mny.v1']; // newest first; older keys are left untouched as safety copies
+var KEY = KEYS[0];
 var DAY = 864e5;
+var NAMES = ['Account 1', 'Account 2', 'Cash'];
+var N = NAMES.length;
 
 /* ---------- data ---------- */
 function defaultAccount(name) {
@@ -21,8 +23,9 @@ function defaultAccount(name) {
 }
 function defaults() {
   return {
-    v: 2,
-    accounts: [defaultAccount('Account 1'), defaultAccount('Account 2')],
+    v: 3,
+    accounts: NAMES.map(defaultAccount),
+    transfers: [],
     settings: { monthStart: 1, theme: 'dark' }
   };
 }
@@ -71,18 +74,33 @@ function sanitizeAccount(raw, defName) {
   return a;
 }
 
+function sanitizeTransfers(list) {
+  var out = [];
+  if (!Array.isArray(list)) return out;
+  list.forEach(function (t) {
+    if (!t || typeof t !== 'object') return;
+    if (!isInt(t.from) || !isInt(t.to) || t.from < 0 || t.to < 0 || t.from >= N || t.to >= N || t.from === t.to) return;
+    if (!isInt(t.amount) || t.amount <= 0) return;
+    var ts = +t.ts;
+    if (!isFinite(ts)) return;
+    out.push({ id: isStr(t.id) && t.id ? t.id : uid(), from: t.from, to: t.to, amount: t.amount, note: isStr(t.note) ? t.note : '', ts: ts });
+  });
+  return out;
+}
+
 function sanitizeSettings(s, d) {
   s = s && typeof s === 'object' ? s : {};
   if (isInt(s.monthStart) && s.monthStart >= 1 && s.monthStart <= 28) d.monthStart = s.monthStart;
   if (s.theme === 'light' || s.theme === 'dark') d.theme = s.theme;
 }
 
-/* accepts the new two-account format and the old single-account format */
+/* accepts the current format (3 accounts + transfers), the 2-account format and the original single-account format */
 function sanitize(raw) {
   var d = defaults();
   if (!raw || typeof raw !== 'object') return d;
   if (Array.isArray(raw.accounts)) {
-    d.accounts = [sanitizeAccount(raw.accounts[0], 'Account 1'), sanitizeAccount(raw.accounts[1], 'Account 2')];
+    d.accounts = NAMES.map(function (n, i) { return sanitizeAccount(raw.accounts[i], n); });
+    d.transfers = sanitizeTransfers(raw.transfers);
     sanitizeSettings(raw.settings, d.settings);
     return d;
   }
@@ -90,7 +108,7 @@ function sanitize(raw) {
     var s = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
     d.accounts[0] = sanitizeAccount({
       entries: raw.entries, opening: s.opening, cats: s.cats, pays: s.pays, budgets: s.budgets
-    }, 'Account 1');
+    }, NAMES[0]);
     sanitizeSettings(s, d.settings);
   }
   return d;
@@ -98,13 +116,18 @@ function sanitize(raw) {
 
 var db;
 function load() {
-  var raw = null, migrated = false;
-  try { raw = localStorage.getItem(KEY); } catch (e) {}
-  if (raw === null) {
-    try { raw = localStorage.getItem(OLD_KEY); migrated = raw !== null; } catch (e) {}
+  var parsed = null, idx = -1, i, raw;
+  for (i = 0; i < KEYS.length && parsed === null; i++) {
+    try {
+      raw = localStorage.getItem(KEYS[i]);
+      if (raw !== null) {
+        var p = JSON.parse(raw);
+        if (p && typeof p === 'object') { parsed = p; idx = i; }
+      }
+    } catch (e) {}
   }
-  try { db = sanitize(JSON.parse(raw)); } catch (e) { db = defaults(); }
-  if (migrated) save(); // old key is left untouched as a safety copy
+  db = sanitize(parsed);
+  if (idx > 0) save(); // migrated from an older format
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); return true; }
@@ -114,14 +137,14 @@ function S() { return db.settings; }
 
 /* ---------- ui state ---------- */
 var ui = { tab: 'add', offset: 0, filter: 'all', acct: 0 };
-var drafts = { add: [null, null], edit: null };
+var drafts = { add: [], edit: null };
 function A() { return db.accounts[ui.acct]; }
+function nm(i) { return db.accounts[i].name; }
 
 /* ---------- money & dates ---------- */
 var nf = null;
 try { nf = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' }); } catch (e) {}
 function fmt(c) { var v = c / 100; return nf ? nf.format(v) : (v < 0 ? '-' : '') + '€' + Math.abs(v).toFixed(2); }
-function signed(e) { return (e.type === 'income' ? '+' : '−') + fmt(e.amount); }
 function parseMoney(s, allowNeg) {
   s = String(s == null ? '' : s).trim().replace(/\s/g, '').replace(',', '.');
   if (!/^-?(\d+(\.\d{0,2})?|\.\d{1,2})$/.test(s)) return NaN;
@@ -141,7 +164,7 @@ function esc(s) {
 }
 function fmtDay(d) { return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); }
 
-/* period = month starting on settings.monthStart (shared by both accounts) */
+/* period = month starting on settings.monthStart (shared by all accounts) */
 function range(offset) {
   var st = S().monthStart, now = new Date();
   var y = now.getFullYear(), m = now.getMonth();
@@ -153,27 +176,52 @@ function range(offset) {
     : fmtDay(start) + ' – ' + fmtDay(new Date(end.getTime() - DAY)) + ' ' + end.getFullYear();
   return { start: start.getTime(), end: end.getTime(), label: label, startDate: start };
 }
+/* income/expense entries of the active account in a period (transfers are NOT included) */
 function inRange(r) {
   return A().entries.filter(function (e) { return e.ts >= r.start && e.ts < r.end; });
 }
+/* transfers touching the active account, shaped like list items */
+function transfersInRange(r) {
+  var out = [];
+  db.transfers.forEach(function (t) {
+    if ((t.from === ui.acct || t.to === ui.acct) && t.ts >= r.start && t.ts < r.end) {
+      out.push({ id: t.id, tf: true, from: t.from, to: t.to, amount: t.amount, note: t.note, ts: t.ts });
+    }
+  });
+  return out;
+}
 function totals(list) {
   var i = 0, x = 0;
-  list.forEach(function (e) { if (e.type === 'income') i += e.amount; else x += e.amount; });
+  list.forEach(function (e) {
+    if (e.tf) return;
+    if (e.type === 'income') i += e.amount; else if (e.type === 'expense') x += e.amount;
+  });
   return { inc: i, exp: x, net: i - x };
 }
-function balanceOf(acct) { return acct.opening + totals(acct.entries).net; }
+function balanceOf(idx) {
+  var a = db.accounts[idx], b = a.opening + totals(a.entries).net;
+  db.transfers.forEach(function (t) {
+    if (t.to === idx) b += t.amount;
+    if (t.from === idx) b -= t.amount;
+  });
+  return b;
+}
 function sortedDesc(list) { return list.slice().sort(function (a, b) { return b.ts - a.ts; }); }
 
+function otherAcct(i) { return (i + 1) % N; }
 function newDraft(prev) {
   var t = prev ? prev.type : 'expense';
+  var ct = t === 'income' ? 'income' : 'expense';
   var pays = A().pays;
   return {
     type: t,
     amount: '',
-    cat: A().cats[t][0],
+    cat: A().cats[ct][0],
     pay: prev && pays.indexOf(prev.pay) >= 0 ? prev.pay : pays[0],
     note: '',
-    when: toLocalInput(Date.now())
+    when: toLocalInput(Date.now()),
+    from: prev && isInt(prev.from) ? prev.from : ui.acct,
+    to: prev && isInt(prev.to) ? prev.to : otherAcct(ui.acct)
   };
 }
 function D(scope) {
@@ -195,7 +243,7 @@ function toast(msg) {
   var t = $('#toast');
   t.textContent = msg; t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(function () { t.hidden = true; }, 2600);
+  toastTimer = setTimeout(function () { t.hidden = true; }, 2800);
 }
 
 /* ---------- views ---------- */
@@ -205,24 +253,35 @@ function acctBar() {
   }).join('') + '</div>';
 }
 
-function formHTML(d, scope) {
-  var a = A();
-  var cats = a.cats[d.type].slice();
-  if (d.cat && cats.indexOf(d.cat) < 0) cats.push(d.cat);
-  var pays = a.pays.slice();
-  if (d.pay && pays.indexOf(d.pay) < 0) pays.push(d.pay);
-  var h = '<div class="seg">' + ['expense', 'income'].map(function (t) {
-    return '<button class="' + (d.type === t ? 'on ' + t : '') + '" data-act="type" data-scope="' + scope + '" data-v="' + t + '">' +
-      (t === 'expense' ? 'Expense' : 'Income') + '</button>';
+function chips(list, cur, act, scope) {
+  return '<div class="chips">' + list.map(function (c) {
+    return '<button class="chip' + (cur === c.v ? ' on' : '') + '" data-act="' + act + '" data-scope="' + scope + '" data-v="' + esc(c.v) + '">' + esc(c.t) + '</button>';
   }).join('') + '</div>';
+}
+
+function formHTML(d, scope) {
+  var a = A(), types = scope === 'edit' ? (d.type === 'transfer' ? [] : ['expense', 'income']) : ['expense', 'income', 'transfer'];
+  var h = '';
+  if (types.length) {
+    h += '<div class="seg">' + types.map(function (t) {
+      return '<button class="' + (d.type === t ? 'on ' + t : '') + '" data-act="type" data-scope="' + scope + '" data-v="' + t + '">' +
+        (t === 'expense' ? 'Expense' : t === 'income' ? 'Income' : 'Transfer') + '</button>';
+    }).join('') + '</div>';
+  }
   h += '<label class="fld"><span>Amount (€)</span><input class="amt" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" value="' +
     esc(d.amount) + '" data-field="amount" data-scope="' + scope + '"></label>';
-  h += '<div class="fld"><span>Category</span><div class="chips">' + cats.map(function (c) {
-    return '<button class="chip' + (d.cat === c ? ' on' : '') + '" data-act="cat" data-scope="' + scope + '" data-v="' + esc(c) + '">' + esc(c) + '</button>';
-  }).join('') + '</div></div>';
-  h += '<div class="fld"><span>Payment method</span><div class="chips">' + pays.map(function (c) {
-    return '<button class="chip' + (d.pay === c ? ' on' : '') + '" data-act="pay" data-scope="' + scope + '" data-v="' + esc(c) + '">' + esc(c) + '</button>';
-  }).join('') + '</div></div>';
+  if (d.type === 'transfer') {
+    var accts = db.accounts.map(function (x, i) { return { v: String(i), t: x.name }; });
+    h += '<div class="fld"><span>From</span>' + chips(accts, String(d.from), 'from', scope) + '</div>';
+    h += '<div class="fld"><span>To</span>' + chips(accts, String(d.to), 'to', scope) + '</div>';
+  } else {
+    var cats = a.cats[d.type].slice();
+    if (d.cat && cats.indexOf(d.cat) < 0) cats.push(d.cat);
+    var pays = a.pays.slice();
+    if (d.pay && pays.indexOf(d.pay) < 0) pays.push(d.pay);
+    h += '<div class="fld"><span>Category</span>' + chips(cats.map(function (c) { return { v: c, t: c }; }), d.cat, 'cat', scope) + '</div>';
+    h += '<div class="fld"><span>Payment method</span>' + chips(pays.map(function (c) { return { v: c, t: c }; }), d.pay, 'pay', scope) + '</div>';
+  }
   h += '<label class="fld"><span>Note (optional)</span><input type="text" maxlength="200" placeholder="e.g. lunch with Nick" value="' +
     esc(d.note) + '" data-field="note" data-scope="' + scope + '"></label>';
   h += '<label class="fld"><span>Date &amp; time</span><input type="datetime-local" value="' + esc(d.when) + '" data-field="when" data-scope="' + scope + '"></label>';
@@ -230,23 +289,39 @@ function formHTML(d, scope) {
 }
 
 function rowHTML(e, showDate) {
-  var sub = [e.pay, e.note].filter(Boolean).join(' · ');
-  if (showDate) sub = new Date(e.ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + (sub ? ' · ' + sub : '');
-  else sub = new Date(e.ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + (sub ? ' · ' + sub : '');
-  return '<button class="hrow" data-act="open" data-id="' + esc(e.id) + '"><div class="m"><div class="c">' + esc(e.cat) +
-    '</div><div class="n">' + esc(sub) + '</div></div><div class="a ' + (e.type === 'income' ? 'inc' : 'exp') + '">' + signed(e) + '</div></button>';
+  var when = showDate
+    ? new Date(e.ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+    : new Date(e.ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  var title, cls, sign;
+  var sub;
+  if (e.tf) {
+    var incoming = e.to === ui.acct;
+    title = incoming ? 'Transfer from ' + nm(e.from) : 'Transfer to ' + nm(e.to);
+    cls = 'xfr'; sign = incoming ? '+' : '−';
+    sub = [e.note].filter(Boolean).join(' · ');
+  } else {
+    title = e.cat;
+    cls = e.type === 'income' ? 'inc' : 'exp';
+    sign = e.type === 'income' ? '+' : '−';
+    sub = [e.pay, e.note].filter(Boolean).join(' · ');
+  }
+  sub = when + (sub ? ' · ' + sub : '');
+  return '<button class="hrow" data-act="open" data-id="' + esc(e.id) + '"><div class="m"><div class="c">' + esc(title) +
+    '</div><div class="n">' + esc(sub) + '</div></div><div class="a ' + cls + '">' + sign + fmt(e.amount) + '</div></button>';
 }
 
 function addView() {
   var d = D('add'), a = A();
-  var r = range(0), t = totals(inRange(r)), bal = balanceOf(a);
-  var all = balanceOf(db.accounts[0]) + balanceOf(db.accounts[1]);
+  var r = range(0), t = totals(inRange(r)), bal = balanceOf(ui.acct), all = 0, i;
+  for (i = 0; i < N; i++) all += balanceOf(i);
   var h = '<h1>Add</h1>' + acctBar();
   h += '<div class="card"><div class="lbl">' + esc(a.name) + ' balance</div><div class="big ' + (bal < 0 ? 'exp' : '') + '">' + fmt(bal) + '</div>' +
     '<div class="sub">' + esc(r.label) + ': <span class="inc">+' + fmt(t.inc) + '</span> · <span class="exp">−' + fmt(t.exp) + '</span></div>' +
-    '<div class="sub" data-total="1">Both accounts: ' + fmt(all) + '</div></div>';
-  h += '<div class="card">' + formHTML(d, 'add') + '<button class="btn" data-act="save" data-scope="add">Save entry</button></div>';
-  var recent = sortedDesc(a.entries).slice(0, 5);
+    '<div class="sub" data-total="1">All accounts: ' + fmt(all) + '</div></div>';
+  h += '<div class="card">' + formHTML(d, 'add') + '<button class="btn" data-act="save" data-scope="add">' + (d.type === 'transfer' ? 'Save transfer' : 'Save entry') + '</button></div>';
+  var tfs = db.transfers.filter(function (t2) { return t2.from === ui.acct || t2.to === ui.acct; })
+    .map(function (t2) { return { id: t2.id, tf: true, from: t2.from, to: t2.to, amount: t2.amount, note: t2.note, ts: t2.ts }; });
+  var recent = sortedDesc(a.entries.concat(tfs)).slice(0, 5);
   if (recent.length) {
     h += '<h2>Recent</h2>' + recent.map(function (e) { return rowHTML(e, true); }).join('');
   }
@@ -259,15 +334,22 @@ function navHTML(r) {
 }
 
 function historyView() {
-  var r = range(ui.offset), list = inRange(r), t = totals(list);
+  var r = range(ui.offset), ents = inRange(r), tfs = transfersInRange(r), t = totals(ents);
   var h = '<h1>History</h1>' + acctBar() + navHTML(r);
   h += '<div class="sum"><div><div class="lbl">Income</div><div class="v inc">' + fmt(t.inc) + '</div></div>' +
     '<div><div class="lbl">Expenses</div><div class="v exp">' + fmt(t.exp) + '</div></div>' +
     '<div><div class="lbl">Net</div><div class="v ' + (t.net < 0 ? 'exp' : 'inc') + '">' + fmt(t.net) + '</div></div></div>';
-  h += '<div class="seg">' + [['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']].map(function (f) {
+  if (tfs.length) {
+    var tin = 0, tout = 0;
+    tfs.forEach(function (x) { if (x.to === ui.acct) tin += x.amount; else tout += x.amount; });
+    h += '<div class="hint" data-tfsum="1">Transfers: <span class="xfr">+' + fmt(tin) + ' in</span> · <span class="xfr">−' + fmt(tout) + ' out</span> (not counted in the totals above)</div>';
+  }
+  h += '<div class="seg">' + [['all', 'All'], ['expense', 'Expenses'], ['income', 'Income'], ['transfer', 'Transfers']].map(function (f) {
     return '<button class="' + (ui.filter === f[0] ? 'on' : '') + '" data-act="filter" data-v="' + f[0] + '">' + f[1] + '</button>';
   }).join('') + '</div>';
-  if (ui.filter !== 'all') list = list.filter(function (e) { return e.type === ui.filter; });
+  var list = ents.concat(tfs);
+  if (ui.filter === 'transfer') list = tfs;
+  else if (ui.filter !== 'all') list = ents.filter(function (e) { return e.type === ui.filter; });
   list = sortedDesc(list);
   if (!list.length) return h + '<div class="empty">No entries in this period.</div>';
   var groups = [], map = {};
@@ -277,9 +359,9 @@ function historyView() {
     map[k].items.push(e);
   });
   groups.forEach(function (g) {
-    var gt = totals(g.items);
+    var real = g.items.filter(function (e) { return !e.tf; }), gt = totals(real);
     h += '<div class="day"><span>' + esc(new Date(g.ts).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })) +
-      '</span><span>' + (gt.net < 0 ? '−' : '+') + fmt(Math.abs(gt.net)) + '</span></div>';
+      '</span><span>' + (real.length ? (gt.net < 0 ? '−' : '+') + fmt(Math.abs(gt.net)) : '') + '</span></div>';
     h += g.items.map(function (e) { return rowHTML(e, false); }).join('');
   });
   return h;
@@ -336,6 +418,7 @@ function statsView() {
   h += '<div class="sum"><div><div class="lbl">Income</div><div class="v inc">' + fmt(t.inc) + '</div></div>' +
     '<div><div class="lbl">Expenses</div><div class="v exp">' + fmt(t.exp) + '</div></div>' +
     '<div><div class="lbl">Net</div><div class="v ' + (t.net < 0 ? 'exp' : 'inc') + '">' + fmt(t.net) + '</div></div></div>';
+  h += '<div class="hint" style="margin-top:-4px">Transfers between accounts are not counted here.</div>';
 
   var spent = {};
   list.forEach(function (e) { if (e.type === 'expense') spent[e.cat] = (spent[e.cat] || 0) + e.amount; });
@@ -381,7 +464,7 @@ function settingsView() {
     return '<button class="' + (s.theme === t ? 'on' : '') + '" data-act="theme" data-v="' + t + '">' + (t === 'dark' ? 'Dark' : 'Light') + '</button>';
   }).join('') + '</div>';
 
-  h += '<h2>General (both accounts)</h2><div class="card">' +
+  h += '<h2>General (all accounts)</h2><div class="card">' +
     db.accounts.map(function (ac, i) {
       return '<label class="fld"><span>Account ' + (i + 1) + ' name</span><input type="text" maxlength="20" data-acctname="' + i + '" value="' + esc(ac.name) + '"></label>';
     }).join('') +
@@ -410,9 +493,9 @@ function settingsView() {
     '<button data-act="addpay">Add</button></div></div>';
   h += '<div class="hint">Removing a category or method does not change past entries.</div>';
 
-  h += '<h2>Data (both accounts)</h2><div class="card">' +
-    '<div class="sub" style="margin-bottom:10px">' + esc(db.accounts[0].name) + ': ' + db.accounts[0].entries.length + ' entries · ' +
-    esc(db.accounts[1].name) + ': ' + db.accounts[1].entries.length + ' entries. Stored on this device only.</div>' +
+  h += '<h2>Data (all accounts)</h2><div class="card">' +
+    '<div class="sub" style="margin-bottom:10px">' + db.accounts.map(function (ac) { return esc(ac.name) + ': ' + ac.entries.length; }).join(' · ') +
+    ' entries · ' + db.transfers.length + ' transfers. Stored on this device only.</div>' +
     '<button class="btn sec" data-act="csv">Export CSV</button>' +
     '<button class="btn sec" data-act="backup">Export backup (JSON)</button>' +
     '<button class="btn sec" data-act="import">Import backup (JSON)</button>' +
@@ -424,8 +507,6 @@ function settingsView() {
 
 var views = { add: addView, history: historyView, stats: statsView, settings: settingsView };
 
-function tabKey() { return ui.tab === 'add' ? (ui.acct === 1 ? 'add2' : 'add') : ui.tab; }
-
 function render(keepScroll, dir) {
   var y = keepScroll ? window.scrollY : 0;
   var v = $('#view');
@@ -435,15 +516,14 @@ function render(keepScroll, dir) {
     void v.offsetWidth;
     v.classList.add(dir === 'l' ? 'in-l' : 'in-r');
   }
-  var k = tabKey();
   Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function (b) {
-    b.classList.toggle('on', b.dataset.tab === k);
+    b.classList.toggle('on', b.dataset.tab === ui.tab);
   });
   window.scrollTo(0, y);
 }
 
 function switchAcct(i) {
-  if (i === ui.acct || !db.accounts[i]) return;
+  if (i === ui.acct || i < 0 || i >= N) return;
   var dir = i > ui.acct ? 'l' : 'r';
   ui.acct = i;
   var dd = drafts.add[i];
@@ -453,16 +533,22 @@ function switchAcct(i) {
 
 function openSheet(id) {
   var e = A().entries.filter(function (x) { return x.id === id; })[0];
-  if (!e) return;
-  drafts.edit = { id: e.id, type: e.type, amount: (e.amount / 100).toFixed(2), cat: e.cat, pay: e.pay, note: e.note, when: toLocalInput(e.ts) };
+  if (e) {
+    drafts.edit = { id: e.id, type: e.type, amount: (e.amount / 100).toFixed(2), cat: e.cat, pay: e.pay, note: e.note, when: toLocalInput(e.ts), from: 0, to: 1 };
+  } else {
+    var t = db.transfers.filter(function (x) { return x.id === id && (x.from === ui.acct || x.to === ui.acct); })[0];
+    if (!t) return;
+    drafts.edit = { id: t.id, type: 'transfer', amount: (t.amount / 100).toFixed(2), cat: '', pay: '', note: t.note, when: toLocalInput(t.ts), from: t.from, to: t.to };
+  }
   renderSheet();
   $('#sheet').hidden = false;
 }
 function renderSheet() {
-  $('#sheet').innerHTML = '<div class="backdrop" data-act="close"></div><div class="sheet"><h1>Edit entry</h1>' +
-    '<div class="hint" style="margin-top:-8px;margin-bottom:10px">' + esc(A().name) + '</div>' + formHTML(drafts.edit, 'edit') +
+  var tf = drafts.edit.type === 'transfer';
+  $('#sheet').innerHTML = '<div class="backdrop" data-act="close"></div><div class="sheet"><h1>' + (tf ? 'Edit transfer' : 'Edit entry') + '</h1>' +
+    (tf ? '' : '<div class="hint" style="margin-top:-8px;margin-bottom:10px">' + esc(A().name) + '</div>') + formHTML(drafts.edit, 'edit') +
     '<button class="btn" data-act="save" data-scope="edit">Save changes</button>' +
-    '<button class="btn danger" data-act="del">Delete entry</button>' +
+    '<button class="btn danger" data-act="del">Delete ' + (tf ? 'transfer' : 'entry') + '</button>' +
     '<button class="btn sec" data-act="close">Cancel</button></div>';
 }
 function closeSheet() { $('#sheet').hidden = true; $('#sheet').innerHTML = ''; drafts.edit = null; }
@@ -470,12 +556,30 @@ function closeSheet() { $('#sheet').hidden = true; $('#sheet').innerHTML = ''; d
 /* ---------- actions ---------- */
 function redraw(scope) { if (scope === 'edit') renderSheet(); else render(true); }
 
+function saveTransfer(scope, d, amt, ts) {
+  if (d.from === d.to) { toast('Choose two different accounts'); return; }
+  if (scope === 'add') {
+    db.transfers.push({ id: uid(), from: d.from, to: d.to, amount: amt, note: d.note.trim(), ts: ts });
+  } else {
+    var t = db.transfers.filter(function (x) { return x.id === d.id; })[0];
+    if (!t) { closeSheet(); return; }
+    t.from = d.from; t.to = d.to; t.amount = amt; t.note = d.note.trim(); t.ts = ts;
+  }
+  if (!save()) return;
+  var msg = scope === 'add' ? 'Transferred ' + fmt(amt) + ': ' + nm(d.from) + ' → ' + nm(d.to) : 'Transfer updated';
+  if (scope === 'add') drafts.add[ui.acct] = newDraft(d);
+  else closeSheet();
+  toast(msg);
+  render(true);
+}
+
 function saveDraft(scope) {
   var d = D(scope), a = A();
   var amt = parseMoney(d.amount, false);
   if (!(amt > 0)) { toast('Enter a valid amount, e.g. 12.50'); return; }
   var ts = new Date(d.when).getTime();
   if (!isFinite(ts)) { toast('Enter a valid date and time'); return; }
+  if (d.type === 'transfer') { saveTransfer(scope, d, amt, ts); return; }
   var entry;
   if (scope === 'add') {
     entry = { id: uid(), type: d.type, amount: amt, cat: d.cat, pay: d.pay, note: d.note.trim(), ts: ts };
@@ -522,12 +626,18 @@ function saveFile(name, text, mime) {
 function stamp() { var d = new Date(); return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()); }
 function csvCell(v) { v = String(v); return /[",\n\r;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 function exportCSV() {
-  var rows = ['account,date,time,type,amount,category,payment,note'];
+  var rows = ['account,date,time,type,amount,category,payment,note,transfer_to'], all = [];
   db.accounts.forEach(function (acc) {
-    sortedDesc(acc.entries).reverse().forEach(function (e) {
-      var l = toLocalInput(e.ts).split('T');
-      rows.push([acc.name, l[0], l[1], e.type, (e.amount / 100).toFixed(2), e.cat, e.pay, e.note].map(csvCell).join(','));
-    });
+    acc.entries.forEach(function (e) { all.push({ ts: e.ts, cells: [acc.name, null, null, e.type, (e.amount / 100).toFixed(2), e.cat, e.pay, e.note, ''] }); });
+  });
+  db.transfers.forEach(function (t) {
+    all.push({ ts: t.ts, cells: [nm(t.from), null, null, 'transfer', (t.amount / 100).toFixed(2), '', '', t.note, nm(t.to)] });
+  });
+  all.sort(function (a, b) { return a.ts - b.ts; });
+  all.forEach(function (x) {
+    var l = toLocalInput(x.ts).split('T');
+    x.cells[1] = l[0]; x.cells[2] = l[1];
+    rows.push(x.cells.map(csvCell).join(','));
   });
   saveFile('moneylog-' + stamp() + '.csv', '﻿' + rows.join('\r\n'), 'text/csv');
 }
@@ -538,30 +648,40 @@ function cleanName(s) { return String(s || '').trim().replace(/\s+/g, ' '); }
 document.addEventListener('click', function (ev) {
   var t = ev.target.closest ? ev.target.closest('[data-act]') : null;
   if (!t) return;
-  var a = t.dataset.act, v = t.dataset.v, scope = t.dataset.scope, d, ac = A();
+  var a = t.dataset.act, v = t.dataset.v, scope = t.dataset.scope, d, ac = A(), k;
   if (a === 'tab') {
-    var tb = t.dataset.tab, prevAcct = ui.acct;
-    if (tb === 'add2') { ui.tab = 'add'; ui.acct = 1; }
-    else if (tb === 'add') { ui.tab = 'add'; ui.acct = 0; }
-    else ui.tab = tb;
+    ui.tab = t.dataset.tab;
     ui.offset = 0;
     var dd = drafts.add[ui.acct];
     if (ui.tab === 'add' && dd && !dd.amount) dd.when = toLocalInput(Date.now());
-    render(false, ui.acct !== prevAcct ? (ui.acct > prevAcct ? 'l' : 'r') : null);
+    render(false);
   } else if (a === 'acct') { switchAcct(parseInt(v, 10)); }
   else if (a === 'type') {
     d = D(scope);
-    if (d.type !== v) { d.type = v; d.cat = ac.cats[v][0]; }
+    if (d.type !== v) {
+      d.type = v;
+      if (v === 'expense' || v === 'income') d.cat = ac.cats[v][0];
+    }
     redraw(scope);
   } else if (a === 'cat') { D(scope).cat = v; redraw(scope); }
   else if (a === 'pay') { D(scope).pay = v; redraw(scope); }
+  else if (a === 'from') {
+    d = D(scope); k = parseInt(v, 10); d.from = k;
+    if (d.to === k) d.to = otherAcct(k);
+    redraw(scope);
+  } else if (a === 'to') {
+    d = D(scope); k = parseInt(v, 10); d.to = k;
+    if (d.from === k) d.from = otherAcct(k);
+    redraw(scope);
+  }
   else if (a === 'save') saveDraft(scope);
   else if (a === 'open') openSheet(t.dataset.id);
   else if (a === 'close') closeSheet();
   else if (a === 'del') {
-    if (drafts.edit && confirm('Delete this entry?')) {
+    if (drafts.edit && confirm('Delete this ' + (drafts.edit.type === 'transfer' ? 'transfer' : 'entry') + '?')) {
       var id = drafts.edit.id;
-      ac.entries = ac.entries.filter(function (x) { return x.id !== id; });
+      if (drafts.edit.type === 'transfer') db.transfers = db.transfers.filter(function (x) { return x.id !== id; });
+      else ac.entries = ac.entries.filter(function (x) { return x.id !== id; });
       save(); closeSheet(); toast('Deleted'); render(true);
     }
   }
@@ -597,8 +717,8 @@ document.addEventListener('click', function (ev) {
   else if (a === 'backup') exportBackup();
   else if (a === 'import') { var f = $('#file'); if (f) f.click(); }
   else if (a === 'reset') {
-    if (confirm('Delete ALL entries and settings of BOTH accounts? This cannot be undone.') && confirm('Really delete everything?')) {
-      db = defaults(); drafts.add = [null, null]; save(); applyTheme(); toast('All data deleted'); render(false);
+    if (confirm('Delete ALL entries, transfers and settings of ALL accounts? This cannot be undone.') && confirm('Really delete everything?')) {
+      db = defaults(); drafts.add = []; save(); applyTheme(); toast('All data deleted'); render(false);
     }
   }
 });
@@ -620,9 +740,9 @@ document.addEventListener('change', function (ev) {
     if (!(m >= 1 && m <= 28)) { toast('Use a day from 1 to 28'); render(true); return; }
     S().monthStart = m; save(); toast('Saved');
   } else if (t.dataset.acctname !== undefined) {
-    var idx = parseInt(t.dataset.acctname, 10), nm = cleanName(t.value).slice(0, 20);
-    if (!nm) { toast('Name cannot be empty'); render(true); return; }
-    db.accounts[idx].name = nm; save(); toast('Saved'); render(true);
+    var idx = parseInt(t.dataset.acctname, 10), name = cleanName(t.value).slice(0, 20);
+    if (!name) { toast('Name cannot be empty'); render(true); return; }
+    db.accounts[idx].name = name; save(); toast('Saved'); render(true);
   } else if (t.dataset.budget) {
     var c = t.dataset.budget;
     if (String(t.value).trim() === '') { delete ac.budgets[c]; save(); toast('Budget removed'); return; }
@@ -634,14 +754,15 @@ document.addEventListener('change', function (ev) {
     rd.onload = function () {
       var parsed;
       try { parsed = JSON.parse(rd.result); } catch (e) { toast('Not a valid backup file'); return; }
-      var isNew = parsed && Array.isArray(parsed.accounts), isOld = parsed && Array.isArray(parsed.entries);
-      if (!isNew && !isOld) { toast('Not a Money Log backup'); return; }
-      var next = sanitize(parsed);
-      var msg = isNew
-        ? 'Replace ALL current data (both accounts) with this backup? (' + next.accounts[0].entries.length + ' + ' + next.accounts[1].entries.length + ' entries)'
-        : 'This is an old single-account backup (' + next.accounts[0].entries.length + ' entries). It will replace ALL current data and go into Account 1. Continue?';
+      var isAcc = parsed && Array.isArray(parsed.accounts), isOld = parsed && Array.isArray(parsed.entries);
+      if (!isAcc && !isOld) { toast('Not a Money Log backup'); return; }
+      var next = sanitize(parsed), cnt = 0;
+      next.accounts.forEach(function (x) { cnt += x.entries.length; });
+      var msg = isAcc
+        ? 'Replace ALL current data with this backup? (' + cnt + ' entries, ' + next.transfers.length + ' transfers)'
+        : 'This is an old single-account backup (' + cnt + ' entries). It will replace ALL current data and go into Account 1. Continue?';
       if (confirm(msg)) {
-        db = next; drafts.add = [null, null]; save(); applyTheme(); toast('Backup imported'); render(false);
+        db = next; drafts.add = []; save(); applyTheme(); toast('Backup imported'); render(false);
       }
     };
     rd.readAsText(t.files[0]);
@@ -663,7 +784,7 @@ document.addEventListener('touchend', function (ev) {
   sw = null;
   if (!p) return;
   var dx = p.clientX - s0.x, dy = p.clientY - s0.y;
-  if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.5) switchAcct(dx < 0 ? 1 : 0);
+  if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.5) switchAcct(ui.acct + (dx < 0 ? 1 : -1));
 }, { passive: true });
 document.addEventListener('touchcancel', function () { sw = null; }, { passive: true });
 

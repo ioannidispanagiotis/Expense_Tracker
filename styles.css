@@ -81,3 +81,6 @@ nav#tabs svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2
 #view.in-r{animation:inR .22s ease-out}
 @media (prefers-reduced-motion:reduce){#view.in-l,#view.in-r{animation:none}}
 nav#tabs button{font-size:10.5px;min-width:0}
+.xfr{color:var(--acc)}
+.seg button.on.transfer{color:var(--acc)}
+.seg button{font-size:15px;padding:10px 4px}
