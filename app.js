@@ -136,7 +136,7 @@ function save() {
 function S() { return db.settings; }
 
 /* ---------- ui state ---------- */
-var ui = { tab: 'add', offset: 0, filter: 'all', acct: 0 };
+var ui = { tab: 'summary', offset: 0, filter: 'all', acct: 0 };
 var drafts = { add: [], edit: null };
 function A() { return db.accounts[ui.acct]; }
 function nm(i) { return db.accounts[i].name; }
@@ -505,7 +505,28 @@ function settingsView() {
   return h;
 }
 
-var views = { add: addView, history: historyView, stats: statsView, settings: settingsView };
+/* where you stand right now: all accounts, current period (period start day comes from Settings) */
+function summaryView() {
+  var r = range(0), all = 0, spent = 0, inc = 0, i, rows = '';
+  for (i = 0; i < N; i++) {
+    var b = balanceOf(i), a = db.accounts[i];
+    var t = totals(a.entries.filter(function (e) { return e.ts >= r.start && e.ts < r.end; }));
+    all += b; spent += t.exp; inc += t.inc;
+    rows += '<div class="hrow"><div class="m"><div class="c">' + esc(a.name) + '</div><div class="n">Spent this month: ' + fmt(t.exp) +
+      '</div></div><div class="a ' + (b < 0 ? 'exp' : '') + '">' + fmt(b) + '</div></div>';
+  }
+  var net = inc - spent;
+  var h = '<h1>Summary</h1>';
+  h += '<div class="card"><div class="lbl">Total balance (all accounts)</div><div class="big ' + (all < 0 ? 'exp' : '') + '" data-sum="total">' + fmt(all) + '</div></div>';
+  h += '<h2>Accounts</h2>' + rows;
+  h += '<h2>This month</h2><div class="card"><div class="lbl">Spent · ' + esc(r.label) + '</div>' +
+    '<div class="big exp" data-sum="spent">' + fmt(spent) + '</div>' +
+    '<div class="sub">Income <span class="inc" data-sum="income">+' + fmt(inc) + '</span> · Net <span class="' + (net < 0 ? 'exp' : 'inc') + '" data-sum="net">' + (net < 0 ? '−' : '+') + fmt(Math.abs(net)) + '</span></div></div>';
+  h += '<div class="hint">Your month starts on day ' + S().monthStart + ' (change it in Settings). Transfers between accounts are not counted as spending or income.</div>';
+  return h;
+}
+
+var views = { summary: summaryView, add: addView, history: historyView, stats: statsView, settings: settingsView };
 
 function render(keepScroll, dir) {
   var y = keepScroll ? window.scrollY : 0;
@@ -773,7 +794,7 @@ document.addEventListener('change', function (ev) {
 var sw = null;
 document.addEventListener('touchstart', function (ev) {
   var sheet = $('#sheet');
-  if ((sheet && !sheet.hidden) || !ev.touches || ev.touches.length !== 1) { sw = null; return; }
+  if ((sheet && !sheet.hidden) || ui.tab === 'summary' || !ev.touches || ev.touches.length !== 1) { sw = null; return; }
   var tg = ev.target;
   if (tg && tg.closest && tg.closest('input,textarea,select,#tabs')) { sw = null; return; }
   sw = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };

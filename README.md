@@ -4,6 +4,7 @@ Personal income and expense log with three independent accounts and transfers be
 
 ## Features
 
+- **Summary tab** (the app opens on it): total balance across all accounts, each account's balance, and total spent this month with income and net. "Month" follows the start day set in Settings. Transfers between accounts are not counted as spending or income.
 - **Three accounts** (default names "Account 1", "Account 2" and "Cash", all renamable). Swipe left/right to switch, or tap the account names at the top of any screen.
 - Each account has its own entries, balance, opening balance, budgets, categories and payment methods
 - **Transfers between accounts**: on the Add screen choose Transfer, pick From and To, enter the amount. Both balances update. Transfers are shown in History (with their own filter) but are **not counted** as income or expenses in totals, budgets or stats.
